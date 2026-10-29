@@ -1,0 +1,13 @@
+#!/bin/sh
+[ -f /etc/config/setupwizard ] || touch /etc/config/setupwizard
+
+uci -q get setupwizard.state >/dev/null || {
+	uci -q batch <<-EOF
+		set setupwizard.state=state
+		set setupwizard.state.done='0'
+		set setupwizard.state.dismissed='0'
+		commit setupwizard
+	EOF
+}
+
+exit 0
