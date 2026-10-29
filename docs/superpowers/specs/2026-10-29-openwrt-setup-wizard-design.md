@@ -62,9 +62,10 @@ what UCI is.
 
 - OpenWrt **snapshot** (modern LuCI, client-side JavaScript views, ucode
   dispatcher).
-- Form: an installable package (`luci-app-setup-wizard` ipk), not a
+- Form: an installable package (`luci-app-setup-wizard`; `.apk` on
+  snapshot, which replaced opkg/ipk with apk), not a
   firmware-only patch. Distribution paths:
-  1. **v1 (in scope)**: the ipk plus a custom feed and image-build
+  1. **v1 (in scope)**: the package plus a custom feed and image-build
      integration, so custom snapshot images can be produced with the
      wizard baked in (the parent `openwrt-builder` workspace is the
      build environment).
@@ -259,13 +260,13 @@ per-target allowlist, no probing heuristics.
     call.
   - Own UCI config `setupwizard` holding state: `done`, `dismissed`.
 - **First-run mechanism**: the wizard must auto-open when LuCI is first
-  entered. Preferred approach (to be confirmed against the snapshot
-  dispatcher during planning): a low-order menu node / dispatcher hook
-  that redirects to the wizard view when `setupwizard.done` and
-  `dismissed` are unset, otherwise to the overview. The exact hook
-  (menu.d order trick vs. dispatcher `firstlogin`-style action) is an
-  implementation decision for the plan; whatever is chosen must survive
-  luci-base updates without patching luci-base itself.
+  entered. Chosen approach (verified against snapshot LuCI, which is
+  ucode + JS, no Lua): after login LuCI lands on the status overview,
+  which loads every `view/status/include/*.js`; the package ships one
+  such include that redirects to the wizard view when `setupwizard.done`
+  and `dismissed` are both `0` (and the user has not skipped in the
+  current browser session). Purely additive — survives luci-base updates
+  without patching luci-base.
 - All configuration writes go through the standard LuCI ubus/rpcd calls
   the ACL grants — no shell commands with user input except the
   documented password call, no custom daemons.
@@ -277,7 +278,7 @@ per-target allowlist, no probing heuristics.
 - Modal popup in LuCI on the router's address; skippable; "don't show
   again" option.
 - Audience: average, non-advanced user (GL.iNet-style simplicity).
-- Installable package (ipk), not firmware-only; menu entry under System
+- Installable package (not firmware-only); menu entry under System
   for manual re-run; re-run re-configures the router.
 - Target: OpenWrt snapshot.
 - Timezone: user selects manually — no GeoIP, no external services; a

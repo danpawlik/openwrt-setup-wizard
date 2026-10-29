@@ -1,8 +1,12 @@
 'use strict';
-return L.view.extend({
-	title: _('Setup Wizard'),
+'require view';
 
+return view.extend({
 	render: function() {
 		return E('h2', {}, _('Setup Wizard'));
-	}
+	},
+
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null
 });

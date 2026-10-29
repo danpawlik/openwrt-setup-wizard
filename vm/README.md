@@ -1,69 +1,47 @@
 # VM test environment
 
-Build and boot harness for testing `luci-app-setup-wizard` against a real
-OpenWrt snapshot system.
+- `build.sh` — build the package inside the podman build container.
+- `boot.sh` — boot an x86_64 OpenWrt image in qemu (fresh state every run).
 
-## Layout
+## Build
 
-- `build.sh` — sync the package into the podman build container and build it.
-- `boot.sh` — boot the x86_64 test image in qemu (fresh state every run).
+Builds run in the `openwrt` podman container (`quay.io/dpawlik/openwrt:f44`),
+tree at `/home/user/openwrt-builder/openwrt`. The host repo is not mounted
+there, so `build.sh`:
 
-## Build (podman container)
+1. copies `luci-app-setup-wizard/` into the tree's `package/` directory
+   (`podman cp`, previous copy removed first — podman cp nests directories
+   otherwise);
+2. temporarily selects the package in `.config` (restored on exit);
+3. runs `make package/luci-app-setup-wizard/compile`.
 
-Builds run inside the `openwrt` podman container (image
-`quay.io/dpawlik/openwrt:f44`), build tree at
-`/home/user/openwrt-builder/openwrt`. The host repo is NOT mounted there, so
-`build.sh` copies the package in via `podman cp` (source of truth stays in
-this repo) and registers it as a `src-link` feed:
+Feeds and `feeds.conf` are not touched. The package Makefile includes
+`$(TOPDIR)/feeds/luci/luci.mk`, so the tree must have the luci feed installed.
 
-```
-src-link setupwizard /home/user/openwrt-builder/openwrt-setup-wizard
-```
+Result: `bin/packages/<arch>/base/luci-app-setup-wizard-*.apk` (snapshot
+packages are `.apk`). Override with `CONTAINER=... CTREE=... vm/build.sh`.
 
-What `build.sh` does:
+## Boot
 
-1. `podman cp` the package (removing the previous copy first — podman cp
-   nests directories otherwise).
-2. Ensure `feeds.conf` exists (mirroring the feeds actually present in
-   `feeds/`; note: `feeds.conf.default` lists feeds that were never
-   installed and breaks `make defconfig` with kconfig recursive-dependency
-   errors).
-3. `./scripts/feeds update setupwizard luci && ./scripts/feeds install luci-app-setup-wizard`.
-4. Temporarily add `CONFIG_PACKAGE_luci-app-setup-wizard=y` to `.config`
-   (backed up and restored — the tree's own config is left untouched).
-5. `make -j$(nproc) package/feeds/setupwizard/luci-app-setup-wizard/compile`.
-
-Result: `bin/packages/<arch>/setupwizard/luci-app-setup-wizard-*.apk`
-(snapshot OpenWrt packages as `.apk`, not `.ipk`).
-
-Run: `vm/build.sh` (override container with `CONTAINER=name vm/build.sh`).
-
-## Boot (qemu, x86_64) — pending until an x86_64 image is built
-
-`boot.sh` boots the combined-ext4 image from
-`../openwrt/bin/targets/x86/64/` in snapshot mode (every boot is a fresh
-install), web on http://localhost:10080, ssh on localhost:10022.
-
-To produce the image (in the container, tree switched to x86_64 target):
+`boot.sh` needs an x86_64 combined image. The current container tree targets
+aarch64, so build x86_64 in a separate tree (or switch the target), with
+`CONFIG_PACKAGE_luci-app-setup-wizard=y`, then copy the image out:
 
 ```
-cd /home/user/openwrt-builder/openwrt
-# select x86/64 target and CONFIG_PACKAGE_luci-app-setup-wizard=y
-make menuconfig
-make -j$(nproc)
+podman cp openwrt:<tree>/bin/targets/x86/64/openwrt-x86-64-generic-ext4-combined.img.gz vm/
+gunzip vm/openwrt-x86-64-generic-ext4-combined.img.gz
+mv vm/openwrt-x86-64-generic-ext4-combined.img vm/openwrt.img
+vm/boot.sh
 ```
 
-## Deferred verification (once the VM exists)
+Or pass any image: `vm/boot.sh path/to/image.img`.
 
-- Menu shows System → Setup Wizard; the page renders.
-- `ssh -p 10022 root@localhost 'uci show setupwizard'` → `done='0'`,
-  `dismissed='0'`.
-- `curl -s -o /dev/null -w '%{http_code}' http://localhost:10080/` → 200/302
-  through LuCI.
+Network: eth0 = LAN (192.168.1.1, forwarded to localhost:10080 web and
+localhost:10022 ssh), eth1 = WAN (DHCP from qemu). When the wizard changes the
+LAN address, the port forwards stop working — restart with the forward target
+edited in `boot.sh`.
 
-## Host-side note
+## Pending checks (Task 1, need the VM)
 
-The host tree `../openwrt` (RH/upstream) is a reference checkout, not the
-build tree. It has `feeds.conf` (created from default + the setupwizard
-src-link) and a shallow `feeds/luci` clone for metadata checks — nothing is
-built there.
+- System → Setup Wizard is in the menu and the page renders.
+- `ssh -p 10022 root@localhost uci show setupwizard` → `done='0'`, `dismissed='0'`.

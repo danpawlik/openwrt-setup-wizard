@@ -2,11 +2,7 @@
 	"luci-app-setup-wizard": {
 		"description": "Grant access to LuCI Setup Wizard",
 		"read": {
-			"uci": [ "setupwizard", "network", "wireless", "system", "firewall", "dhcp" ],
-			"ubus": {
-				"network.interface": [ "status" ],
-				"network.device": [ "status" ]
-			}
+			"uci": [ "setupwizard", "network", "wireless", "system", "firewall", "dhcp" ]
 		},
 		"write": {
 			"uci": [ "setupwizard", "network", "wireless", "system", "firewall", "dhcp" ]
