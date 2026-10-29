@@ -11,9 +11,10 @@ Package: `luci-app-setup-wizard`. Target: OpenWrt snapshot.
 ## What it configures
 
 1. **Administrator password**: leave empty to keep the current one.
-2. **Internet connection**: shows the detected WAN state in plain words.
-   Optional changes: DHCP, static address, or PPPoE, plus a VLAN ID for
-   providers that require tagged WAN.
+2. **Internet connection**: shows the detected WAN state in plain words,
+   with the connection type always visible: DHCP, static address, PPPoE or
+   PPPoA, plus a VLAN ID for providers that require tagged WAN. A protocol
+   the wizard cannot edit is kept as is.
 3. **Repeater mode**: offered when no cable is plugged into the WAN port.
    Scans for networks and joins the main router as a WDS client, bridged
    into the LAN. The main router must run OpenWrt with WDS enabled on its
@@ -21,8 +22,11 @@ Package: `luci-app-setup-wizard`. Target: OpenWrt snapshot.
 4. **Time zone**: preselected from the browser's time zone (Europe/Warsaw
    for Polish), changeable from the full list.
 5. **WiFi**: one network name and password. "One network name for all
-   bands" is on by default; turn it off to get per-band names with a
-   `_2G`, `_5G` or `_6G` suffix. Each band can be turned on or off.
+   bands" is on by default and uses every band; turn it off to get
+   per-band names with a `_2G`, `_5G` or `_6G` suffix and per-band
+   on/off switches. "Support old devices or IoT" runs 2.4 GHz in 802.11n
+   mode with WPA2. On multi-radio devices an extra Multi-Link (MLO)
+   network for WiFi 7 devices can be added with its own name.
    Security is WPA2/WPA3 mixed, and WPA3 only on 6 GHz.
 6. **Router address**: change the LAN from `192.168.1.1/24` to another
    network. The DHCP pool is adjusted to fit, and addresses that overlap

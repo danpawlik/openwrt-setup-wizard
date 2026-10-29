@@ -19,15 +19,20 @@ var callSetPassword = rpc.declare({
 	expect: { result: false }
 });
 
+var callRevert = rpc.declare({
+	object: 'uci',
+	method: 'revert',
+	params: [ 'config' ]
+});
+
 var BANDS = { '2g': '2G', '5g': '5G', '6g': '6G', '60g': '60G' };
 var GHZ = { '2G': '2.4', '5G': '5', '6G': '6', '60G': '60' };
-
-var dirty = false; /* set when the wizard staged at least one change */
 
 var PROTOS = {
 	dhcp: _('Automatic (DHCP)'),
 	static: _('Static address'),
-	pppoe: _('PPPoE (login and password from your provider)')
+	pppoe: _('PPPoE (login and password from your provider)'),
+	pppoa: _('PPPoA (DSL — login and password from your provider)')
 };
 
 function ssGet(k) {
@@ -109,22 +114,17 @@ function set(conf, sid, opt, val) {
 	if (Array.isArray(val)) val = val.length ? val : null;
 
 	if (val == null) {
-		if (cur != null) {
+		if (cur != null)
 			uci.unset(conf, sid, opt);
-			dirty = true;
-		}
 	}
 	else if (String(cur) != (Array.isArray(val) ? val.join(' ') : String(val))) {
 		uci.set(conf, sid, opt, val);
-		dirty = true;
 	}
 }
 
 function setBool(conf, sid, opt, on) {
-	if ((uci.get(conf, sid, opt) == '1') != on) {
+	if ((uci.get(conf, sid, opt) == '1') != on)
 		uci.set(conf, sid, opt, on ? '1' : '0');
-		dirty = true;
-	}
 }
 
 /* UI helpers */
@@ -139,12 +139,15 @@ function field(label, input, desc) {
 	]);
 }
 
-function textInput(obj, key, type) {
+function textInput(obj, key, type, oninput) {
 	return E('input', {
 		'class': 'cbi-input-text',
 		'type': type || 'text',
 		'value': obj[key] != null ? obj[key] : '',
-		'input': function(ev) { obj[key] = ev.target.value; }
+		'input': function(ev) {
+			obj[key] = ev.target.value;
+			if (oninput) oninput(ev.target.value);
+		}
 	});
 }
 
@@ -174,10 +177,12 @@ function select(obj, key, choices, onchange) {
 }
 
 /* Wizard steps: render(view) returns the step body, validate(view) returns an
- * error message or null; `when` hides steps that do not apply. */
+ * error message or null; `when` hides steps that do not apply. `short` is the
+ * label used in the step overview row. */
 
 var STEPS = [ {
 	title: _('Administrator password'),
+	short: _('Password'),
 	render: function(v) {
 		var p = v.m.password;
 		return [
@@ -198,6 +203,8 @@ var STEPS = [ {
 	}
 }, {
 	title: _('Internet connection'),
+	short: _('Internet'),
+	when: function(v) { return v.env.wan.iface || v.env.radios.length; },
 	render: function(v) {
 		var m = v.m, w = m.wan, st = v.env.wan, body = [];
 
@@ -215,15 +222,15 @@ var STEPS = [ {
 			], v.redraw)));
 		}
 
-		if (m.mode == 'extend')
+		if (m.mode == 'extend' || !w.base)
 			return body;
 
-		body.push(E('p', {}, checkbox(w, 'edit', _('Change internet connection settings'), v.redraw)));
+		var choices = Object.keys(PROTOS).map(function(k) { return [ k, PROTOS[k] ]; });
+		if (!PROTOS[w.proto])
+			/* protocol the wizard cannot edit (l2tp, modemmanager, …): keep it */
+			choices.unshift([ w.proto, _('Keep current settings (%s)').format(w.proto) ]);
 
-		if (!w.edit)
-			return body;
-
-		body.push(field(_('Connection type'), select(w, 'proto', Object.keys(PROTOS).map(function(k) { return [ k, PROTOS[k] ]; }), v.redraw)));
+		body.push(field(_('Connection type'), select(w, 'proto', choices, v.redraw)));
 
 		if (w.proto == 'static') {
 			body.push(field(_('IP address'), textInput(w, 'ipaddr')));
@@ -231,7 +238,7 @@ var STEPS = [ {
 			body.push(field(_('Gateway'), textInput(w, 'gateway')));
 			body.push(field(_('DNS servers'), textInput(w, 'dns'), _('Separate multiple addresses with spaces.')));
 		}
-		else if (w.proto == 'pppoe') {
+		else if (w.proto == 'pppoe' || w.proto == 'pppoa') {
 			body.push(field(_('Username'), textInput(w, 'username')));
 			body.push(field(_('Password'), textInput(w, 'password', 'password')));
 		}
@@ -246,10 +253,8 @@ var STEPS = [ {
 	validate: function(v) {
 		var w = v.m.wan;
 
-		if (v.m.mode == 'extend' || !w.edit)
+		if (v.m.mode == 'extend' || !w.base || !PROTOS[w.proto])
 			return null;
-		if (!w.base)
-			return _('The WAN port could not be determined.');
 
 		if (w.proto == 'static') {
 			if (!isIPv4(w.ipaddr))
@@ -261,8 +266,8 @@ var STEPS = [ {
 			if (parseDns(w.dns) == null)
 				return _('Enter valid DNS server addresses.');
 		}
-		else if (w.proto == 'pppoe' && (!w.username || !w.password)) {
-			return _('Enter the PPPoE username and password from your provider.');
+		else if ((w.proto == 'pppoe' || w.proto == 'pppoa') && (!w.username || !w.password)) {
+			return _('Enter the username and password from your provider.');
 		}
 
 		if (w.vlan && !(/^\d+$/.test(w.vlanId) && +w.vlanId >= 1 && +w.vlanId <= 4094))
@@ -272,6 +277,7 @@ var STEPS = [ {
 	}
 }, {
 	title: _('Network to extend'),
+	short: _('Repeater'),
 	when: function(v) { return v.m.mode == 'extend'; },
 	render: function(v) {
 		var r = v.m.repeater, body = [
@@ -329,6 +335,7 @@ var STEPS = [ {
 	}
 }, {
 	title: _('Time zone'),
+	short: _('Time zone'),
 	render: function(v) {
 		return [
 			E('p', _('Select the time zone where this router is located.')),
@@ -342,6 +349,7 @@ var STEPS = [ {
 	}
 }, {
 	title: _('WiFi'),
+	short: _('WiFi'),
 	render: function(v) {
 		var wf = v.m.wifi, radios = v.env.radios;
 
@@ -353,38 +361,98 @@ var STEPS = [ {
 		if (radios.every(function(d) { return d.disabled; }))
 			body.push(E('div', { 'class': 'alert-message notice' }, _('WiFi is currently off. Set a network name and password below to turn it on.')));
 
-		body.push(field(_('Network name'), textInput(wf, 'ssid')));
-		body.push(field(_('Password'), textInput(wf, 'key', 'password'), _('At least 8 characters.')));
-		body.push(E('p', {}, checkbox(wf, 'shared', _('One network name for all bands'), v.redraw)));
+		/* per-band name previews, updated live while typing */
+		var updatePreviews = function() {};
+		var mloInput = null;
 
-		radios.forEach(function(d) {
-			var name = wf.shared ? wf.ssid : wf.ssid + '_' + d.band;
-			body.push(E('p', {}, checkbox(wf.radios, d.name, _('Enable %s GHz').format(GHZ[d.band] || d.band) +
-				(wf.ssid ? ' — "%s"'.format(name) : ''), v.redraw)));
-		});
+		var syncMloName = function() {
+			/* follow the main name until the Multi-Link name is edited */
+			if (wf.mloSsidTouched)
+				return;
+			wf.mloSsid = wf.ssid ? wf.ssid + '_MLO' : '';
+			if (mloInput)
+				mloInput.value = wf.mloSsid;
+		};
+
+		body.push(field(_('Network name'), textInput(wf, 'ssid', null, function() {
+			updatePreviews();
+			syncMloName();
+		})));
+		body.push(field(_('Password'), textInput(wf, 'key', 'password'), _('At least 8 characters.')));
+		body.push(E('p', {}, checkbox(wf, 'shared', _('One network name for all bands'), function() {
+			/* a single shared network uses every band */
+			if (wf.shared)
+				radios.forEach(function(d) { wf.radios[d.name] = true; });
+			v.redraw();
+		})));
+
+		if (!wf.shared) {
+			var previews = radios.map(function() { return E('span'); });
+			updatePreviews = function() {
+				radios.forEach(function(d, i) {
+					previews[i].textContent = wf.ssid ? ' — "%s"'.format(wf.ssid + '_' + d.band) : '';
+				});
+			};
+			updatePreviews();
+
+			radios.forEach(function(d, i) {
+				body.push(E('p', {}, [
+					checkbox(wf.radios, d.name, _('Enable %s GHz').format(GHZ[d.band] || d.band), v.redraw),
+					previews[i]
+				]));
+			});
+		}
+
+		if (radios.some(function(d) { return d.band == '2G'; })) {
+			body.push(E('p', {}, checkbox(wf, 'legacy', _('Support old devices or IoT (2.4 GHz in N mode)'), v.redraw)));
+			body.push(E('div', { 'class': 'cbi-value-description' }, _('Runs the 2.4 GHz band in 802.11n mode with old data rates and WPA2 security. Slower, but works with the oldest devices.')));
+		}
+
+		if (radios.length > 1) {
+			body.push(E('p', {}, checkbox(wf, 'mlo', _('Add a Multi-Link (MLO) network for WiFi 7 devices'), function() {
+				syncMloName();
+				v.redraw();
+			})));
+			body.push(E('div', { 'class': 'cbi-value-description' }, _('An extra network that combines all enabled bands into one, so WiFi 7 devices can use them simultaneously. Requires hardware with Multi-Link support.')));
+			if (wf.mlo) {
+				mloInput = textInput(wf, 'mloSsid', null, function() { wf.mloSsidTouched = true; });
+				body.push(field(_('Multi-Link network name'), mloInput));
+			}
+		}
 
 		return body;
 	},
 	validate: function(v) {
-		var wf = v.m.wifi, longest = '';
+		var wf = v.m.wifi, longest = '', anyOn = false;
 
 		v.env.radios.forEach(function(d) {
 			var name = wf.shared ? wf.ssid : wf.ssid + '_' + d.band;
-			if (wf.radios[d.name] && name.length > longest.length) longest = name;
+			if (wf.radios[d.name]) {
+				anyOn = true;
+				if (name.length > longest.length) longest = name;
+			}
 		});
 
-		if (!longest)
+		if (wf.mlo) {
+			anyOn = true;
+			if (wf.mloSsid.length > longest.length) longest = wf.mloSsid;
+		}
+
+		if (!anyOn)
 			return null; /* WiFi left off */
 		if (!wf.ssid)
 			return _('Enter a network name.');
 		if (byteLength(longest) > 32)
 			return _('The network name is too long (at most 32 bytes, including the band suffix).');
-		if (wf.key.length < 8 || wf.key.length > 63)
+		if (byteLength(wf.key) < 8 || byteLength(wf.key) > 63)
 			return _('The WiFi password must be 8 to 63 characters long.');
+		if (wf.mlo && v.env.radios.filter(function(d) { return wf.radios[d.name]; }).length < 2)
+			return _('The Multi-Link network needs at least two enabled bands.');
 		return null;
 	}
 }, {
 	title: _('Router address'),
+	short: _('Address'),
 	when: function(v) { return v.m.mode != 'extend'; },
 	render: function(v) {
 		var choices = [];
@@ -412,14 +480,17 @@ var STEPS = [ {
 	}
 }, {
 	title: _('Optimizations (optional)'),
+	short: _('Optimizations'),
 	render: function(v) {
 		var o = v.m.opt;
 		return [
 			E('p', _('Optional settings that can improve performance. The defaults are fine for most users.')),
 			E('p', {}, checkbox(o, 'sw', _('Software flow offloading'), function() { if (!o.sw) o.hw = false; v.redraw(); })),
 			E('div', { 'class': 'cbi-value-description' }, _('Speeds up routing by bypassing parts of the firewall for established connections.')),
-			E('p', {}, checkbox(o, 'hw', _('Hardware flow offloading'), function() { if (o.hw) o.sw = true; v.redraw(); })),
-			E('div', { 'class': 'cbi-value-description' }, _('Moves established connections to the network hardware, where the device supports it. Requires software flow offloading.')),
+			/* hardware offloading needs software offloading, so hide it while
+			 * that is off instead of showing a checkbox that cannot work */
+			o.sw ? E('p', {}, checkbox(o, 'hw', _('Hardware flow offloading'), function() { if (o.hw) o.sw = true; v.redraw(); })) : '',
+			o.sw ? E('div', { 'class': 'cbi-value-description' }, _('Moves established connections to the network hardware, where the device supports it.')) : '',
 			E('p', {}, checkbox(o, 'steering', _('Packet steering'))),
 			E('div', { 'class': 'cbi-value-description' }, _('Spreads network processing across all CPU cores. Usually not needed together with hardware offloading.')),
 			E('p', {}, checkbox(o, 'igmp', _('IGMP snooping'))),
@@ -432,16 +503,17 @@ var STEPS = [ {
 	}
 }, {
 	title: _('Summary'),
+	short: _('Summary'),
 	render: function(v) {
 		var rows = v.summary().map(function(r) {
 			return E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td left', 'style': 'width:33%' }, E('strong', r[0])),
+				E('td', { 'class': 'td left', 'style': 'width:40%' }, E('strong', r[0])),
 				E('td', { 'class': 'td left' }, r[1])
 			]);
 		});
 
 		var body = [
-			E('p', _('The following settings will be applied:')),
+			E('p', _('Check the settings below, then apply them. Nothing is changed until you press "Apply settings".')),
 			E('table', { 'class': 'table' }, rows)
 		];
 
@@ -451,6 +523,24 @@ var STEPS = [ {
 		else if (v.m.mode == 'extend')
 			body.push(E('div', { 'class': 'alert-message warning' },
 				_('This router will get its address from your main router. After applying, find it in the client list of your main router to open this page again.')));
+
+		/* advanced: the exact uci commands the wizard will run */
+		var cmds = E('div', {
+			'style': 'font-family:monospace;font-size:85%;white-space:pre-wrap;margin:.5em 0 0 0;padding:.5em;border:1px solid #ccc;border-radius:.25rem'
+		}, E('em', {}, _('Loading…')));
+
+		body.push(E('details', {}, [
+			E('summary', { 'style': 'cursor:pointer;margin-top:1em' }, _('Advanced: UCI commands to execute')),
+			cmds
+		]));
+
+		v.stageChanges().then(function(lines) {
+			dom.content(cmds, lines.length ? lines.map(function(l) {
+				return E('div', { 'style': l.charAt(0) == '#' ? 'opacity:.6' : '' }, l);
+			}) : [ E('div', {}, _('No configuration changes.')) ]);
+		}).catch(function(e) {
+			dom.content(cmds, [ E('div', {}, _('Could not determine the commands: %s').format(e.message || e)) ]);
+		});
 
 		return body;
 	}
@@ -477,10 +567,11 @@ return view.extend({
 
 		this.env = {
 			fresh: uci.get('setupwizard', 'state', 'done') != '1',
-			zones: data[3] || {},
+			zones: Object.assign({ UTC: { tzstring: 'GMT0' } }, data[3] || {}),
 			devs: devs,
 			radios: radios,
 			wan: {
+				iface: !!wan,
 				up: wan ? wan.isUp() : false,
 				proto: wan ? wan.getProtocol() : null,
 				ip: wan ? wan.getIPAddr() : null,
@@ -508,32 +599,37 @@ return view.extend({
 	initModel: function() {
 		var env = this.env;
 
-		/* WAN: remember the untagged port so the VLAN can be changed later */
+		/* WAN: remember the untagged port so the VLAN can be changed later;
+		 * ignore the saved port once the user moves WAN elsewhere */
 		var wanDev = uci.get('network', 'wan', 'device') || '',
-		    base = uci.get('setupwizard', 'state', 'wan_device') || wanDev,
+		    saved = uci.get('setupwizard', 'state', 'wan_device'),
 		    vm = wanDev.match(/^(.+)\.(\d+)$/),
+		    base = (vm && vm[1] == saved) ? saved : wanDev,
 		    vlan = !!(vm && vm[1] == base && base != wanDev),
 		    proto = uci.get('network', 'wan', 'proto'),
 		    dns = uci.get('network', 'wan', 'dns');
 
 		/* LAN */
-		var ip = uci.get('network', 'lan', 'ipaddr'), bits;
+		var ip = uci.get('network', 'lan', 'ipaddr'), bits, cidr;
 		if (Array.isArray(ip)) ip = ip[0];
 		ip = ip || '192.168.1.1';
-		if (ip.indexOf('/') >= 0) {
+		cidr = ip.indexOf('/') >= 0;
+		if (cidr) {
 			bits = +ip.split('/')[1];
 			ip = ip.split('/')[0];
 		}
 		else {
 			bits = maskToBits(uci.get('network', 'lan', 'netmask') || '255.255.255.0') || 24;
 		}
-		env.lan = { ipaddr: ip, bits: String(bits) };
+		env.lan = { ipaddr: ip, bits: String(bits), cidr: cidr };
 
 		/* WiFi: prefill from the first access point */
-		var ap = uci.sections('wireless', 'wifi-iface').filter(function(s) { return (s.mode || 'ap') == 'ap'; })[0] || {},
+		var ap = uci.sections('wireless', 'wifi-iface').filter(function(s) { return (s.mode || 'ap') == 'ap' && s.mlo != '1'; })[0] || {},
 		    ssid = ap.ssid || '',
 		    suffixed = /_(2G|5G|6G)$/.test(ssid),
-		    radios = {};
+		    radios = {},
+		    radio2g = env.radios.filter(function(d) { return d.band == '2G'; })[0],
+		    mloAp = uci.sections('wireless', 'wifi-iface').filter(function(s) { return s.mlo == '1' && (s.mode || 'ap') == 'ap'; })[0];
 
 		env.radios.forEach(function(d) { radios[d.name] = env.fresh || !d.disabled; });
 
@@ -549,14 +645,16 @@ return view.extend({
 
 		var fw = uci.sections('firewall', 'defaults')[0] || {},
 		    br = uci.sections('network', 'device').filter(function(s) { return s.name == 'br-lan'; })[0] || {},
-		    repeater = uci.sections('wireless', 'wifi-iface').filter(function(s) { return s.mode == 'sta' && s.wds == '1'; })[0];
+		    repeater = uci.sections('wireless', 'wifi-iface').filter(function(s) { return s.mode == 'sta' && s.wds == '1'; })[0],
+		    mode = repeater && !env.wan.carrier ? 'extend' : 'router',
+		    uplink = mode == 'extend' ? 'lan' : 'wan',
+		    uplinkDns = uci.get('network', uplink, 'dns');
 
 		return {
 			password: { value: '', confirm: '' },
-			mode: repeater && !env.wan.carrier ? 'extend' : 'router',
+			mode: mode,
 			wan: {
-				edit: false,
-				proto: PROTOS[proto] ? proto : 'dhcp',
+				proto: proto || 'dhcp',
 				ipaddr: uci.get('network', 'wan', 'ipaddr') || '',
 				netmask: uci.get('network', 'wan', 'netmask') || '255.255.255.0',
 				gateway: uci.get('network', 'wan', 'gateway') || '',
@@ -578,7 +676,11 @@ return view.extend({
 				ssid: suffixed ? ssid.replace(/_(2G|5G|6G)$/, '') : ssid,
 				key: (ap.encryption && ap.encryption != 'none') ? ap.key || '' : '',
 				shared: !suffixed,
-				radios: radios
+				radios: radios,
+				legacy: !!(radio2g && /^HT/.test(uci.get('wireless', radio2g.name, 'htmode') || '')),
+				mlo: !!mloAp,
+				mloSsid: mloAp ? mloAp.ssid || '' : '',
+				mloSsidTouched: !!mloAp
 			},
 			lan: { ipaddr: env.lan.ipaddr, bits: env.lan.bits },
 			opt: {
@@ -586,7 +688,8 @@ return view.extend({
 				hw: env.fresh || fw.flow_offloading_hw == '1',
 				steering: uci.get('network', 'globals', 'packet_steering') == '1',
 				igmp: br.igmp_snooping == '1',
-				dns: ''
+				dns: uci.get('network', uplink, 'peerdns') == '0'
+					? (Array.isArray(uplinkDns) ? uplinkDns.join(' ') : (uplinkDns || '')) : ''
 			}
 		};
 	},
@@ -596,7 +699,7 @@ return view.extend({
 	},
 
 	draw: function(error) {
-		var steps = this.steps(), st, last;
+		var self = this, steps = this.steps(), st, last;
 
 		this.step = Math.min(this.step, steps.length - 1);
 		st = steps[this.step];
@@ -604,9 +707,20 @@ return view.extend({
 
 		var skip = { dont: false };
 
+		/* one row with every step, so the user sees the whole journey up front
+		 * and knows the last step only reviews and applies */
+		var stepper = E('div', {
+			'class': 'cbi-map-descr',
+			'style': 'display:flex;flex-wrap:wrap;column-gap:.75em;row-gap:.2em;margin:0 0 1em 0;font-size:.9em'
+		}, steps.map(function(s, i) {
+			var done = i < self.step;
+			return E('span', { 'style': done ? 'opacity:.75' : (i == self.step ? '' : 'opacity:.5') },
+				(done ? '✓ ' : (i + 1) + '. ') + (s.short || s.title));
+		}));
+
 		dom.content(this.root, [
 			E('h2', {}, _('Setup Wizard')),
-			E('div', { 'class': 'cbi-map-descr' }, _('Step %d of %d: %s').format(this.step + 1, steps.length, st.title)),
+			stepper,
 			error ? E('div', { 'class': 'alert-message warning' }, error) : '',
 			E('div', { 'class': 'cbi-section' }, [ E('h3', {}, st.title) ].concat(st.render(this))),
 			E('div', { 'class': 'cbi-page-actions' }, [
@@ -671,28 +785,39 @@ return view.extend({
 	},
 
 	handleSkip: function(skip) {
-		var go = function() { window.location = L.url('admin/status/overview'); };
+		var self = this;
 
 		ssSet('setupwizard-skipped', '1');
 
-		if (!skip.dont)
-			return go();
+		/* the summary may have staged the wizard's changes for display;
+		 * skipping must not apply them */
+		var unstage = uci.changes().then(function(chg) {
+			var confs = Object.keys(chg || {});
+			return Promise.all(confs.map(function(conf) { return callRevert(conf); }));
+		}).catch(function() {});
 
-		uci.set('setupwizard', 'state', 'dismissed', '1');
-		return uci.save().then(function() { return uci.apply(); }).then(go, go);
+		return unstage.then(function() {
+			if (!skip.dont)
+				return;
+
+			uci.set('setupwizard', 'state', 'dismissed', '1');
+			return uci.save().then(function() { return uci.apply(); });
+		}).then(function() {
+			window.location = L.url('admin/status/overview');
+		}, function() {
+			window.location = L.url('admin/status/overview');
+		});
 	},
 
 	summary: function() {
-		var m = this.m, env = this.env, rows = [], opts = [];
+		var m = this.m, env = this.env, rows = [];
 
 		rows.push([ _('Administrator password'), m.password.value ? _('will be changed') : _('unchanged') ]);
 
 		if (m.mode == 'extend')
-			rows.push([ _('Internet connection'), _('Extend the WiFi network "%s"').format(m.repeater.ssid) ]);
-		else if (m.wan.edit)
-			rows.push([ _('Internet connection'), PROTOS[m.wan.proto] + (m.wan.vlan ? ', VLAN %s'.format(m.wan.vlanId) : '') ]);
+			rows.push([ _('Internet connection'), _('extend the WiFi network "%s"').format(m.repeater.ssid) ]);
 		else
-			rows.push([ _('Internet connection'), _('unchanged') ]);
+			rows.push([ _('Internet connection'), (PROTOS[m.wan.proto] || _('current (%s)').format(m.wan.proto)) + (m.wan.vlan ? _(', VLAN %s').format(m.wan.vlanId) : '') ]);
 
 		rows.push([ _('Time zone'), m.timezone.replace(/_/g, ' ') ]);
 
@@ -700,19 +825,60 @@ return view.extend({
 			rows.push([ _('WiFi'), _('no wireless hardware') ]);
 		env.radios.forEach(function(d) {
 			rows.push([ _('WiFi %s GHz').format(GHZ[d.band] || d.band),
-				m.wifi.radios[d.name] ? '"%s"'.format(m.wifi.shared ? m.wifi.ssid : m.wifi.ssid + '_' + d.band) : _('off') ]);
+				m.wifi.radios[d.name] ? '"%s"%s'.format(m.wifi.shared ? m.wifi.ssid : m.wifi.ssid + '_' + d.band,
+					(m.wifi.legacy && d.band == '2G') ? _(' (N mode for old devices)') : '') : _('off') ]);
 		});
+		if (m.wifi.mlo && env.radios.length > 1)
+			rows.push([ _('WiFi Multi-Link'), '"%s"'.format(m.wifi.mloSsid) ]);
 
-		rows.push([ _('Router address'), m.mode == 'extend' ? _('assigned by the main router') : '%s/%s'.format(m.lan.ipaddr, m.lan.bits) ]);
+		rows.push([ _('Router address'), m.mode == 'extend' ? _('from the main router') : '%s/%s'.format(m.lan.ipaddr, m.lan.bits) ]);
 
-		if (m.opt.hw) opts.push(_('hardware flow offloading'));
-		else if (m.opt.sw) opts.push(_('software flow offloading'));
-		if (m.opt.steering) opts.push(_('packet steering'));
-		if (m.opt.igmp) opts.push(_('IGMP snooping'));
-		if (parseDns(m.opt.dns).length) opts.push(_('DNS: %s').format(parseDns(m.opt.dns).join(', ')));
-		rows.push([ _('Optimizations'), opts.length ? opts.join(', ') : _('none') ]);
+		/* one row per option reads better than a comma list */
+		rows.push([ _('Software flow offloading'), m.opt.sw ? _('on') : _('off') ]);
+		rows.push([ _('Hardware flow offloading'), m.opt.hw ? _('on') : _('off') ]);
+		rows.push([ _('Packet steering'), m.opt.steering ? _('on') : _('off') ]);
+		rows.push([ _('IGMP snooping'), m.opt.igmp ? _('on') : _('off') ]);
+		rows.push([ _('Custom DNS servers'), parseDns(m.opt.dns).length ? parseDns(m.opt.dns).join(', ') : _('provider default') ]);
 
 		return rows;
+	},
+
+	/* Stage the wizard's changes in the LuCI session (nothing is committed
+	 * yet) and return them as a list of uci command lines. Called by the
+	 * summary step; apply runs writeConfig again, which then stages nothing
+	 * new. */
+	stageChanges: function() {
+		this.writeConfig();
+
+		return uci.save().then(function() {
+			return uci.changes();
+		}).then(function(chg) {
+			var lines = [];
+
+			Object.keys(chg || {}).sort().forEach(function(conf) {
+				lines.push('# /etc/config/' + conf);
+				(chg[conf] || []).forEach(function(c) {
+					var v = function(x) { return "'%s'".format(String(x).replace(/'/g, "'\"'\"'")); };
+
+					if (c[0] == 'add')
+						lines.push('uci add %s %s # =%s'.format(conf, c[2], c[1]));
+					else if (c[0] == 'set' && c.length >= 4)
+						lines.push('uci set %s.%s.%s=%s'.format(conf, c[1], c[2], v(c[3])));
+					else if (c[0] == 'set')
+						lines.push('uci set %s.%s=%s'.format(conf, c[1], v(c[2])));
+					else if (c[0] == 'remove' && c.length >= 3)
+						lines.push('uci del %s.%s.%s'.format(conf, c[1], c[2]));
+					else if (c[0] == 'remove')
+						lines.push('uci del %s.%s'.format(conf, c[1]));
+					else if (c[0] == 'list-add')
+						lines.push('uci add_list %s.%s.%s=%s'.format(conf, c[1], c[2], v(c[3])));
+					else if (c[0] == 'list-del')
+						lines.push('uci del_list %s.%s.%s=%s'.format(conf, c[1], c[2], v(c[3])));
+				});
+			});
+
+			return lines;
+		});
 	},
 
 	writeConfig: function() {
@@ -721,25 +887,31 @@ return view.extend({
 		/* stations created by the wizard (repeater uplinks) */
 		var stations = uci.sections('wireless', 'wifi-iface').filter(function(s) { return s.mode == 'sta' && s.wds == '1'; });
 		var removeStations = function() {
-			stations.forEach(function(s) { uci.remove('wireless', s['.name']); dirty = true; });
+			stations.forEach(function(s) { uci.remove('wireless', s['.name']); });
 		};
 
 		if (m.mode == 'extend') {
-			var r = m.repeater, sid;
+			var r = m.repeater, sta = null;
 
 			uplink = 'lan';
-			removeStations();
 
-			dirty = true;
-			sid = uci.add('wireless', 'wifi-iface');
-			uci.set('wireless', sid, 'device', r.radio);
-			uci.set('wireless', sid, 'mode', 'sta');
-			uci.set('wireless', sid, 'network', 'lan');
-			uci.set('wireless', sid, 'ssid', r.ssid);
-			uci.set('wireless', sid, 'encryption', r.encryption);
-			if (r.encryption != 'none')
-				uci.set('wireless', sid, 'key', r.key);
-			uci.set('wireless', sid, 'wds', '1');
+			/* drop repeater uplinks on other radios, reuse the one on the
+			 * chosen radio so a re-run does not churn the section */
+			stations.forEach(function(s) {
+				if (s.device == r.radio)
+					sta = s;
+				else
+					uci.remove('wireless', s['.name']);
+			});
+
+			var ssid = sta ? sta['.name'] : uci.add('wireless', 'wifi-iface');
+			set('wireless', ssid, 'device', r.radio);
+			set('wireless', ssid, 'mode', 'sta');
+			set('wireless', ssid, 'network', 'lan');
+			set('wireless', ssid, 'ssid', r.ssid);
+			set('wireless', ssid, 'encryption', r.encryption);
+			set('wireless', ssid, 'key', r.encryption != 'none' ? r.key : null);
+			set('wireless', ssid, 'wds', '1');
 			set('wireless', r.radio, 'disabled', '0');
 
 			/* bridged into the main network: take the address from the main
@@ -752,25 +924,50 @@ return view.extend({
 		else {
 			removeStations();
 
-			if (m.wan.edit) {
-				var w = m.wan, dev = w.vlan ? w.base + '.' + w.vlanId : w.base;
+			/* WAN settings are always shown, but only differing values are
+			 * written, so an untouched connection produces no changes */
+			var w = m.wan, dev = w.vlan ? w.base + '.' + w.vlanId : w.base;
 
-				set('network', 'wan', 'proto', w.proto);
-				set('network', 'wan', 'ipaddr', w.proto == 'static' ? w.ipaddr : null);
-				set('network', 'wan', 'netmask', w.proto == 'static' ? w.netmask : null);
-				set('network', 'wan', 'gateway', w.proto == 'static' ? w.gateway : null);
-				set('network', 'wan', 'dns', w.proto == 'static' ? parseDns(w.dns) : null);
-				set('network', 'wan', 'username', w.proto == 'pppoe' ? w.username : null);
-				set('network', 'wan', 'password', w.proto == 'pppoe' ? w.password : null);
+			if (w.base) {
+				var ppp = (w.proto == 'pppoe' || w.proto == 'pppoa');
+
+				if (PROTOS[w.proto])
+					set('network', 'wan', 'proto', w.proto);
+				if (PROTOS[w.proto] && w.proto != 'static') {
+					set('network', 'wan', 'ipaddr', null);
+					set('network', 'wan', 'netmask', null);
+					set('network', 'wan', 'gateway', null);
+				}
+				if (w.proto == 'static') {
+					set('network', 'wan', 'ipaddr', w.ipaddr);
+					set('network', 'wan', 'netmask', w.netmask);
+					set('network', 'wan', 'gateway', w.gateway);
+					set('network', 'wan', 'dns', parseDns(w.dns));
+				}
+				if (PROTOS[w.proto]) {
+					set('network', 'wan', 'username', ppp ? w.username : null);
+					set('network', 'wan', 'password', ppp ? w.password : null);
+				}
 				set('network', 'wan', 'device', dev);
 				if (uci.get('network', 'wan6'))
-					set('network', 'wan6', 'device', w.proto == 'pppoe' ? '@wan' : dev);
+					set('network', 'wan6', 'device', ppp ? '@wan' : dev);
 				set('setupwizard', 'state', 'wan_device', w.vlan ? w.base : null);
 			}
 
+			/* keep the LAN address in the form the config already uses, and
+			 * write nothing when it did not change (a re-run must not restart
+			 * the LAN for no reason) */
 			set('network', 'lan', 'proto', 'static');
-			set('network', 'lan', 'ipaddr', m.lan.ipaddr);
-			set('network', 'lan', 'netmask', bitsToMask(+m.lan.bits));
+			if (m.lan.ipaddr != env.lan.ipaddr || m.lan.bits != env.lan.bits) {
+				if (env.lan.cidr) {
+					set('network', 'lan', 'ipaddr', [ m.lan.ipaddr + '/' + m.lan.bits ]);
+					set('network', 'lan', 'netmask', null);
+				}
+				else {
+					set('network', 'lan', 'ipaddr', m.lan.ipaddr);
+					set('network', 'lan', 'netmask', bitsToMask(+m.lan.bits));
+				}
+			}
 			set('dhcp', 'lan', 'ignore', null);
 
 			/* keep the DHCP pool inside the (possibly smaller) network */
@@ -797,23 +994,59 @@ return view.extend({
 				/* the repeater uplink keeps its radio on */
 				if (!(m.mode == 'extend' && m.repeater.radio == d.name))
 					set('wireless', d.name, 'disabled', '1');
-				return;
+			}
+			else {
+				ap = uci.sections('wireless', 'wifi-iface').filter(function(s) {
+					return s.device == d.name && (s.mode || 'ap') == 'ap' && s.mlo != '1';
+				})[0];
+				sid = ap ? ap['.name'] : uci.add('wireless', 'wifi-iface');
+
+				var name = m.wifi.shared ? m.wifi.ssid : m.wifi.ssid + '_' + d.band;
+
+				set('wireless', sid, 'device', d.name);
+				set('wireless', sid, 'mode', 'ap');
+				set('wireless', sid, 'network', 'lan');
+				set('wireless', sid, 'ssid', name);
+
+				/* only re-secure a network whose name or password changed,
+				 * so a re-run does not break working WPA2 setups */
+				if (!ap || ap.ssid != name || (m.wifi.key && ap.key != m.wifi.key)) {
+					set('wireless', sid, 'encryption',
+						d.band == '6G' ? 'sae' : /* 6 GHz requires WPA3 */
+						(m.wifi.legacy && d.band == '2G' ? 'psk2' : 'sae-mixed'));
+					set('wireless', sid, 'key', m.wifi.key);
+					set('wireless', sid, 'wds', '1');
+				}
+
+				set('wireless', d.name, 'disabled', '0');
 			}
 
-			ap = uci.sections('wireless', 'wifi-iface').filter(function(s) {
-				return s.device == d.name && (s.mode || 'ap') == 'ap';
-			})[0];
-			sid = ap ? ap['.name'] : uci.add('wireless', 'wifi-iface');
-
-			set('wireless', sid, 'device', d.name);
-			set('wireless', sid, 'mode', 'ap');
-			set('wireless', sid, 'network', 'lan');
-			set('wireless', sid, 'ssid', m.wifi.shared ? m.wifi.ssid : m.wifi.ssid + '_' + d.band);
-			set('wireless', sid, 'encryption', d.band == '6G' ? 'sae' : 'sae-mixed'); /* 6 GHz requires WPA3 */
-			set('wireless', sid, 'key', m.wifi.key);
-			set('wireless', sid, 'wds', '1');
-			set('wireless', d.name, 'disabled', '0');
+			/* old devices / IoT: run 2.4 GHz in N mode with legacy rates */
+			if (d.band == '2G') {
+				set('wireless', d.name, 'htmode', on && m.wifi.legacy ? 'HT20' : null);
+				set('wireless', d.name, 'legacy_rates', on && m.wifi.legacy ? '1' : null);
+			}
 		});
+
+		/* Multi-Link network: one AP spanning the enabled radios; the wizard
+		 * owns the named section, so re-runs only update changed options */
+		var mloDevs = env.radios.filter(function(d) { return m.wifi.radios[d.name]; }).map(function(d) { return d.name; }),
+		    mloSid = uci.get('wireless', 'wizard_mlo') ? 'wizard_mlo' : null;
+
+		if (m.wifi.mlo && mloDevs.length > 1) {
+			if (!mloSid)
+				mloSid = uci.add('wireless', 'wifi-iface', 'wizard_mlo');
+			set('wireless', mloSid, 'device', mloDevs);
+			set('wireless', mloSid, 'mode', 'ap');
+			set('wireless', mloSid, 'network', 'lan');
+			set('wireless', mloSid, 'ssid', m.wifi.mloSsid);
+			set('wireless', mloSid, 'encryption', 'psk2'); /* MLD adds SAE for multi-link clients */
+			set('wireless', mloSid, 'key', m.wifi.key);
+			set('wireless', mloSid, 'mlo', '1');
+		}
+		else if (mloSid) {
+			uci.remove('wireless', mloSid);
+		}
 
 		/* optimizations */
 		var fw = uci.sections('firewall', 'defaults')[0];
@@ -831,10 +1064,17 @@ return view.extend({
 		if (br)
 			setBool('network', br['.name'], 'igmp_snooping', m.opt.igmp);
 
+		/* custom DNS: writing it also fixes a re-run that would otherwise
+		 * drop a previously set DNS list; clearing it restores provider DNS */
 		var dns = parseDns(m.opt.dns);
 		if (dns.length) {
 			set('network', uplink, 'peerdns', '0');
 			set('network', uplink, 'dns', dns);
+		}
+		else {
+			set('network', uplink, 'peerdns', null);
+			if (!(m.mode != 'extend' && m.wan.proto == 'static'))
+				set('network', uplink, 'dns', null);
 		}
 
 		set('setupwizard', 'state', 'done', '1');
@@ -847,18 +1087,25 @@ return view.extend({
 			if (!ok)
 				throw new Error(_('The password could not be changed.'));
 
-			dirty = false;
 			self.writeConfig();
 			return uci.save();
 		}).then(function() {
 			/* do not bounce back into the wizard for the rest of this session */
 			ssSet('setupwizard-skipped', '1');
 
-			if (!dirty)
+			/* decide on the changes actually staged in the session, not on a
+			 * flag: a cancelled apply leaves them staged, not committed */
+			return uci.changes();
+		}).then(function(chg) {
+			if (!chg || !Object.keys(chg).length)
 				return self.drawDone();
 
 			ssSet('setupwizard-applied', '1');
-			ui.changes.apply(true);
+			/* in repeater mode the address comes from the main router, so a
+			 * checked apply (polled at the old address) could never confirm */
+			return ui.changes.init().then(function() {
+				ui.changes.apply(m.mode != 'extend');
+			});
 		}).catch(function(e) {
 			self.draw(e.message || String(e));
 		});

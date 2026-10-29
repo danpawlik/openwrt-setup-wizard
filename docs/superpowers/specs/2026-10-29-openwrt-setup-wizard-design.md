@@ -84,8 +84,13 @@ what UCI is.
    always visible; next to it a checkbox "Don't show this again". Skipping
    without the checkbox leaves the wizard available in the menu and shows
    it again on next login; with the checkbox it never auto-shows again.
-3. Steps render inside the modal, one at a time, with Back/Next. A final
-   summary screen lists every change that will be applied.
+3. Steps render inside the modal, one at a time, with Back/Next. A single
+   row above the step body lists all steps (with check marks for the ones
+   already done), so the user sees the whole journey up front and knows
+   the last step only reviews and applies. A final summary screen lists
+   every setting, one row per option, and an "Advanced" expander showing
+   the exact `uci` commands the wizard will run (staged into the LuCI
+   session, reverted if the user skips).
 4. Apply → progress → success screen. If the LAN address changed, the
    success screen shows the new address prominently and tells the user to
    reconnect to it (the wizard restarts the network).
@@ -107,9 +112,10 @@ what UCI is.
   `ubus network.interface.wan status` (and `wan6`): protocol (dhcp /
   static / pppoe / others), whether it has an address, uptime, gateway.
 - Present the detected state in plain words ("Your router got an address
-  automatically from your provider (DHCP). Internet works.") plus a
-  "Change settings" expander offering:
-  - Protocol: DHCP / Static / PPPoE.
+  automatically from your provider (DHCP). Internet works."), followed
+  directly by the connection settings (no expander; user request 2026-10-29):
+  - Protocol: DHCP / Static / PPPoE / PPPoA (a protocol outside this list,
+    e.g. l2tp, is offered as "keep current settings" and left untouched).
   - PPPoE: username + password fields (PAP/CHAP credentials).
   - Static: address, netmask, gateway, DNS.
   - VLAN tagging on the WAN device: enable + VLAN ID field (for ISPs that
@@ -162,11 +168,20 @@ what UCI is.
   (WPA2/WPA3); no security options exposed.
 - Checkbox **"One network name for all bands"** — checked by default.
   Checked: the same SSID is applied to every radio (2.4 / 5 / 6 GHz —
-  whatever the device has). Unchecked: each band gets its own SSID by
+  whatever the device has) and every band is enabled; the per-band
+  switches are hidden. Unchecked: each band gets its own SSID by
   appending a suffix to the entered name — `_2G`, `_5G`, or `_6G`
-  depending on the band (password still shared).
-- Per-radio enable toggles remain visible, with a per-band hint
-  (2.4 GHz / 5 GHz / 6 GHz).
+  depending on the band (password still shared) — and per-band
+  on/off switches with a live name preview are shown.
+- Checkbox **"Support old devices or IoT (2.4 GHz in N mode)"**: sets the
+  2.4 GHz radio to `htmode HT20` with `legacy_rates` and WPA2-PSK on its
+  AP (user request 2026-10-29).
+- Checkbox **"Add a Multi-Link (MLO) network for WiFi 7 devices"** (only
+  with more than one radio): an additional AP with its own SSID spanning
+  the enabled radios as one MLD (`mlo 1`, `encryption psk2` — the MLD adds
+  SAE for multi-link clients). No reliable way to detect MLO hardware
+  support exists in LuCI, so the help text names the requirement
+  (user request 2026-10-29).
 - On targets where WiFi is disabled by default (most), this step is the
   main value; it must clearly say "WiFi is currently off" when it is.
 - My call: AP interfaces configured here also get WDS support enabled
