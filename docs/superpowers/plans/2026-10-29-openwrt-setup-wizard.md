@@ -4,7 +4,7 @@
 
 **Goal:** Build `luci-app-setup-wizard` — a first-run LuCI wizard (password, WAN, timezone, WiFi, LAN, optimizations, WDS repeater) for OpenWrt snapshot, plus custom-feed and image-build integration.
 
-**Architecture:** A standard LuCI client-side JS application package (menu.d + ACL + uci-defaults + one view module + one pure-logic module). First-run auto-open is a hidden low-order menu node that redirects based on UCI state flags. All configuration is applied atomically through LuCI's built-in uci apply/rollback flow. Pure logic lives in a node-testable module; integration is validated in a qemu x86 VM.
+**Architecture:** A standard LuCI client-side JS application package (menu.d + ACL + uci-defaults + one view module + one pure-logic module). First-run auto-open is a status-overview include (`view/status/include/`) that redirects to the wizard based on UCI state flags. All configuration is applied atomically through LuCI's built-in uci apply/rollback flow. Pure logic lives in a node-testable module; integration is validated in a qemu x86 VM.
 
 **Tech Stack:** OpenWrt snapshot buildroot (`../openwrt`), LuCI JS (client-side views), rpcd ACLs, UCI, node ≥18 for unit tests, qemu + chrome-devtools MCP for e2e.
 
@@ -14,6 +14,9 @@
 
 - All user-visible strings in English, wrapped in LuCI's `_()` for future i18n. All docs in English.
 - **Never patch luci-base or any feed file** — upstream-clean mechanisms only.
+- Snapshot LuCI is ucode + client-side JS: no Lua code (no luci-compat dependency). Views use `'require view'`, not the legacy `L.view`.
+- Snapshot packages are `.apk`. Reference LuCI source: the host checkout `../luci`.
+- Builds run in the podman container `openwrt` via `vm/build.sh` (package copied into the tree's `package/`); never build on the host, never modify the container tree's feeds or `.config`.
 - Target: OpenWrt snapshot, DSA devices (x86_64, mediatek/filogic).
 - Apply is atomic via uci apply-with-rollback; the wizard only writes fields its own forms expose (re-run must not reset untouched config).
 - No external services, no telemetry.
@@ -42,7 +45,7 @@ Failure modes the spec implies but task tests don't fully exercise; each is pinn
 - Test: `vm/boot.sh`
 
 **Interfaces:**
-- Produces: package `luci-app-setup-wizard` building against `../openwrt`; menu node `admin/system/setup-wizard` (title "Setup Wizard", action view `system/setup-wizard`); UCI file `setupwizard` with `config state 'state'; option done '0'; option dismissed '0'`; `vm/boot.sh` starting the image with web on `localhost:10080`, ssh on `localhost:10022`, snapshot mode.
+- Produces: package `luci-app-setup-wizard` built by `vm/build.sh` in the podman container; menu node `admin/system/setup-wizard` (title "Setup Wizard", action view `system/setup-wizard`); UCI file `setupwizard` with `config state 'state'; option done '0'; option dismissed '0'`; `vm/boot.sh` starting the image with web on `localhost:10080`, ssh on `localhost:10022`, snapshot mode.
 
 - [ ] **Step 1: Write the check first**
 
@@ -52,9 +55,9 @@ Failure modes the spec implies but task tests don't fully exercise; each is pinn
 
 Makefile: `include $(TOPDIR)/rules.mk`, `PKG_NAME:=luci-app-setup-wizard`, `PKG_VERSION:=1.0.0`, `PKG_RELEASE:=1`, `LUCI_TITLE:=LuCI Setup Wizard`, `LUCI_DEPENDS:=+luci-base`, `LUCI_PKGARCH:=all`, `include $(TOPDIR)/feeds/luci/luci.mk`. menu.d JSON defines only `admin/system/setup-wizard` for now. ACL file with the uci read/write grants from the spec's architecture section (`setupwizard`, `network`, `wireless`, `system`, `firewall`, `dhcp`). uci-defaults script creates `/etc/config/setupwizard` idempotently (`[ -f ] ||` guard). View file: minimal `return L.view.extend({ render: () => E('h2', {}, _('Setup Wizard')) })`.
 
-- [ ] **Step 3: Wire the feed and build**
+- [ ] **Step 3: Build in the container**
 
-In `../openwrt`: add `src-link setupwizard /home/dpawlik/RH/upstream/openwrt-builder/openwrt-setup-wizard` to `feeds.conf`, run `./scripts/feeds update setupwizard && ./scripts/feeds install -a`, enable `CONFIG_PACKAGE_luci-app-setup-wizard=y` with x86_64 target (build config per `openwrt-configure.sh` conventions), `make -j$(nproc)`. Record the exact commands in `vm/README.md`.
+`vm/build.sh`: `podman cp` the package into `<tree>/package/` of the `openwrt` container, temporarily select it in `.config` (restored on exit), `make package/luci-app-setup-wizard/compile`. Document in `vm/README.md`, including how to get an x86_64 image for `vm/boot.sh`.
 
 - [ ] **Step 4: Verify in VM**
 
@@ -103,13 +106,13 @@ Run: `node test/run-tests.js` — Expected: all assertions pass, exit 0.
 ### Task 3: First-run auto-open + skip semantics
 
 **Files:**
-- Create: `luci-app-setup-wizard/root/usr/lib/lua/luci/view/setupwizard/entry.htm`
-- Modify: `luci-app-setup-wizard/root/usr/share/luci/menu.d/luci-app-setup-wizard.json`, view `system/setup-wizard.js`
+- Create: `luci-app-setup-wizard/htdocs/luci-static/resources/view/status/include/05_setupwizard.js`
+- Modify: view `system/setup-wizard.js`
 - Test: manual/browser checks in VM (below)
 
 **Interfaces:**
 - Consumes: UCI flags from Task 1.
-- Produces: hidden node `admin/setup-wizard-entry` (order 1, no title — renders no menu item) that redirects: `done==0 && dismissed==0` → `admin/system/setup-wizard`, else → `admin/status/overview`. Wizard view gains `handleSkip(dontShowAgain)` writing `dismissed` and `handleDone()` writing `done` (both via `L.uci.set` on `setupwizard.state`).
+- Produces: status-overview include `05_setupwizard.js`. After login LuCI lands on `admin/status/overview` (`admin` is `firstchild`), and the overview (`../luci/modules/luci-mod-status/htdocs/luci-static/resources/view/status/index.js`) loads every `view/status/include/*.js`. The include's `load()` reads `setupwizard.state` and, when `done==0 && dismissed==0` and the browser session has not skipped (`sessionStorage` key `setupwizard-skipped`), redirects to `L.url('admin/system/setup-wizard')`; `render()` returns nothing visible. Wizard view gains `handleSkip(dontShowAgain)` (no checkbox → set the sessionStorage key only; checkbox → also write `dismissed='1'`) and `handleDone()` writing `done='1'` (via `uci.set` on `setupwizard.state`).
 
 - [ ] **Step 1: Define the pass checks**
 
@@ -117,11 +120,11 @@ Run: `node test/run-tests.js` — Expected: all assertions pass, exit 0.
 
 - [ ] **Step 2: Run them — they fail**
 
-No entry node exists; landing goes to overview.
+No include exists; landing stays on overview.
 
 - [ ] **Step 3: Implement**
 
-menu.d: add `admin/setup-wizard-entry` with `"order": 1` and a `template` action pointing at `setupwizard/entry.htm` (use the exact action JSON shape used by template actions in `../openwrt/feeds/luci/modules/luci-base/root/usr/share/luci/menu.d/luci-base.json`). `entry.htm`: read `setupwizard.state.done/dismissed` via `luci.model.uci`, then `luci.http.redirect(...)` to one of the two URLs. Add Skip control + "Don't show this again" checkbox and `handleSkip` to the view. If landing-order resolution turns out not to honor `order` for the admin index child (verify against the dispatcher in `../openwrt/feeds/luci/modules/luci-base/lua/luci/dispatcher.lua`), fallback — documented in the commit message: override node `admin/status/overview`'s action with a wrapper view that checks the flags and delegates to the original overview class; never patch luci-base.
+Write the include per the Interfaces block (`'require view'`, `'require uci'`; a failed uci load must not break the overview — catch and do nothing). Add the Skip control + "Don't show this again" checkbox and `handleSkip` to the wizard view. Snapshot LuCI is ucode + JS: no Lua templates, no menu or dispatcher tricks, nothing in luci-base touched.
 
 - [ ] **Step 4: Run the four checks in the VM — all pass**
 
@@ -174,7 +177,7 @@ Two fields (password + confirmation); mismatch or <8 chars while non-empty → N
 
 - [ ] **Step 3: Implement**
 
-Render per checks; store into `model.password`. For the actual password set, mirror exactly the mechanism luci-base uses in `../openwrt/feeds/luci/modules/luci-base/htdocs/luci-static/resources/view/system/admin.js` for password changes (fs.exec on `/bin/passwd` or equivalent) and extend the ACL with precisely the grant that code path requires (check `../openwrt/feeds/luci/modules/luci-base/root/usr/share/rpcd/acl.d/luci-base.json` for the matching entry). Execute it as the first action of apply.
+Render per checks; store into `model.password`. For the actual password set, use the same rpc call as `../luci/modules/luci-mod-system/htdocs/luci-static/resources/view/system/password.js` (`rpc.declare({object: 'luci', method: 'setPassword', params: ['username', 'password']})`) and add the matching ACL write grant `"ubus": {"luci": ["setPassword"]}` (as in `../luci/modules/luci-mod-system/root/usr/share/rpcd/acl.d/luci-mod-system.json`). Execute it as the first action of apply.
 
 - [ ] **Step 4: Run checks in VM — pass** (including logout/login with new password).
 
@@ -213,7 +216,7 @@ With qemu user-net the WAN port gets DHCP: wizard shows "connected via DHCP"; sw
 - Test: VM walkthrough (x86 has no WiFi — see Review Focus 3; scan list needs the B3000 or a wifi-bearing test target)
 
 **Interfaces:**
-- Consumes: `model.wan.mode`, `model.repeater`, ubus `iwinfo` (`devices`, `scan`) — grant in ACL; scan call mirrors `../openwrt/feeds/luci/modules/luci-mod-network/htdocs/luci-static/resources/view/network/wireless.js` "Join Network" scan.
+- Consumes: `model.wan.mode`, `model.repeater`, ubus `iwinfo` (`devices`, `scan`) — grant in ACL; scan call mirrors `../luci/modules/luci-mod-network/htdocs/luci-static/resources/view/network/wireless.js` "Join Network" scan.
 - Produces: step `repeater`, shown only when `model.wan.mode === 'extend'`; apply section writing the WDS STA interface.
 
 - [ ] **Step 1: Define pass checks**
@@ -239,7 +242,7 @@ x86: step skipped when WAN up (the scan path needs real radios — exercise it d
 - Test: `test/run-tests.js` (guessTimezone already tested), VM walkthrough
 
 **Interfaces:**
-- Consumes: `guessTimezone` (Task 2), the zone list exactly as luci-base's system clock settings source it (`../openwrt/feeds/luci/modules/luci-base/htdocs/luci-static/resources/view/system/system.js` — reuse its timezone data module/import; do not embed a second copy of the zone list).
+- Consumes: `guessTimezone` (Task 2), the zone list exactly as the system settings page sources it (`../luci/modules/luci-mod-system/htdocs/luci-static/resources/view/system/system.js`: `rpc.declare({object: 'luci', method: 'getTimezones'})`, ACL read grant `"ubus": {"luci": ["getTimezones"]}`); do not embed a second copy of the zone list.
 - Produces: step `timezone`; apply writes `system.@system[0].zonename`/`timezone` (same key pairs luci-base writes).
 
 - [ ] **Step 1: Pass checks**
@@ -322,7 +325,7 @@ Input as `ip/maskBits`; validate on Next; prefill from current `network.lan`; wa
 
 **Interfaces:**
 - Consumes: `collectChanges` (Task 4), every step's apply section, `handleDone` (Task 3).
-- Produces: summary screen (step after `opt`) and `applyAll(model)`: 1) password (Task 5 mechanism), 2) all UCI writes staged via `L.uci.set`, 3) apply through luci-base's built-in apply/rollback flow — the same code path the config pages use (`ui.changes.apply` / `L.uci.apply` — mirror `../openwrt/feeds/luci/modules/luci-base/htdocs/luci-static/resources/ui.js`), 4) `setupwizard.state.done='1'` staged in the same apply, 5) success screen; when `model.lan` changed, success screen names the new address and the built-in reconnect logic handles the switch.
+- Produces: summary screen (step after `opt`) and `applyAll(model)`: 1) password (Task 5 mechanism), 2) all UCI writes staged via `L.uci.set`, 3) apply through luci-base's built-in apply/rollback flow — the same code path the config pages use (`ui.changes.apply` / `L.uci.apply` — mirror `../luci/modules/luci-base/htdocs/luci-static/resources/ui.js`), 4) `setupwizard.state.done='1'` staged in the same apply, 5) success screen; when `model.lan` changed, success screen names the new address and the built-in reconnect logic handles the switch.
 
 - [ ] **Step 1: Define the three VM scenarios (pass checks)**
 
@@ -344,7 +347,7 @@ A) Happy path: complete all steps, summary lists every change before Apply, appl
 - Test: built images
 
 **Interfaces:**
-- Consumes: Task 1 feed wiring; `configs/mediatek` conventions for the B3000 (GL.iNet B3000 = mediatek/filogic target — confirm exact subtarget/device with `../openwrt/scripts/dl`/menuconfig before building).
+- Consumes: `vm/build.sh` container conventions (Task 1); `configs/mediatek` conventions for the B3000 (GL.iNet B3000 = mediatek/filogic target — confirm the exact device profile in menuconfig before building).
 - Produces: reproducible build scripts producing (a) an x86_64 image with the wizard built in, (b) a B3000 sysupgrade image with the wizard built in.
 
 - [ ] **Step 1: Pass checks**
@@ -355,7 +358,7 @@ Both scripts run end-to-end in the podman build container per `../README.md` con
 
 - [ ] **Step 3: Implement**
 
-Wrap the existing configure/build flow; add `CONFIG_PACKAGE_luci-app-setup-wizard=y` (and luci defaults) to the x86 and mediatek configs; keep the wizard package selected via the `src-link` feed from Task 1. Record the B3000 device profile name and build results in `vm/README.md`.
+Wrap the existing configure/build flow; add `CONFIG_PACKAGE_luci-app-setup-wizard=y` (and luci defaults) to the x86 and mediatek configs; register this repo as a feed in the image build tree (`src-git setupwizard <repo-url>` or `src-link` to a copy inside the container — the repo root is the feed root) so images pull the package the same way any feed package is pulled. Record the B3000 device profile name and build results in `vm/README.md`.
 
 - [ ] **Step 4: Run both scripts — images produced; x86 image boots in `vm/boot.sh` with wizard auto-open working.**
 
