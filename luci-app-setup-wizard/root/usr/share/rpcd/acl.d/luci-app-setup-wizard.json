@@ -2,9 +2,20 @@
 	"luci-app-setup-wizard": {
 		"description": "Grant access to LuCI Setup Wizard",
 		"read": {
+			"ubus": {
+				"iwinfo": [ "scan" ],
+				"luci": [ "getTimezones" ],
+				"luci-rpc": [ "getBoardJSON", "getNetworkDevices", "getWirelessDevices" ],
+				"network": [ "get_proto_handlers" ],
+				"network.device": [ "status" ],
+				"network.interface": [ "dump" ]
+			},
 			"uci": [ "setupwizard", "network", "wireless", "system", "firewall", "dhcp" ]
 		},
 		"write": {
+			"ubus": {
+				"luci": [ "setPassword" ]
+			},
 			"uci": [ "setupwizard", "network", "wireless", "system", "firewall", "dhcp" ]
 		}
 	}
