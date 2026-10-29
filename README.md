@@ -6,7 +6,20 @@ internet and WiFi in a few clicks, without touching the full LuCI menus.
 
 Package: `luci-app-setup-wizard`. Target: OpenWrt snapshot.
 
-<!-- Screenshots: TODO -->
+## Screenshots
+
+The wizard steps as shown in LuCI on a router running this package:
+
+| Step | Screenshot |
+|------|------------|
+| 1. Password | ![Password step](screenshots/step1-password.png) |
+| 2. Internet | ![Internet step](screenshots/step2-internet.png) |
+| 3. Time zone | ![Time zone step](screenshots/step3-timezone.png) |
+| 4. WiFi | ![WiFi step](screenshots/step4-wifi.png) |
+| 5. Address | ![Address step](screenshots/step5-address.png) |
+| 6. Optimizations | ![Optimizations step](screenshots/step6-optimizations.png) |
+| 7. Summary | ![Summary step](screenshots/step7-summary.png) |
+| 7. Summary, advanced | ![Summary with UCI commands](screenshots/step7-summary-advanced.png) |
 
 ## What it configures
 
